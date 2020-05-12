@@ -260,34 +260,30 @@ const step = (now) => {
     ctx.clearRect(0, 0, scrw, scrh);
 
     // Draw board
-    for (let r = 0; r < board.nrows; ++r) {
-        for (let c = 0; c < board.ncols; ++c) {
-            const occupant = board.getOccupant(r, c);
-            if (occupant === undefined) continue;
+    board.forEach(({r, c}) => {
+        const { x, y } = tile2scr(r, c);
+        const occupant = board.getOccupant(r, c);
+        const drawCircle = (style) => {
+            ctx.fillStyle = style;
+            ctx.beginPath();
+            ctx.ellipse(x + tilescrw / 2, y + tilescrh / 2, tilescrw / 3, tilescrh / 3, 0, 0, 2 * Math.PI);
+            ctx.fill();
+        };
 
-            const { x, y } = tile2scr(r, c);
-            const drawCircle = (style) => {
-                ctx.fillStyle = style;
-                ctx.beginPath();
-                ctx.ellipse(x + tilescrw / 2, y + tilescrh / 2, tilescrw / 3, tilescrh / 3, 0, 0, 2 * Math.PI);
-                ctx.fill();
-            };
+        ctx.strokeStyle = '#000';
+        ctx.strokeRect(x, y, tilescrw, tilescrh);
 
-            ctx.strokeStyle = '#000';
-            ctx.strokeRect(x, y, tilescrw, tilescrh);
-
-            switch (occupant) {
-                case Occupant.NOBODY:
-                    break;
-                case Occupant.PLAYER_1:
-                    drawCircle('#e40');
-                    break;
-                case Occupant.PLAYER_2:
-                    drawCircle('#04e');
-                    break;
-            }
+        switch (occupant) {
+            case Occupant.NOBODY:
+                break;
+            case Occupant.PLAYER_1:
+                drawCircle('#e40');
+                break;
+            case Occupant.PLAYER_2:
+                drawCircle('#04e');
+                break;
         }
-    }
+    });
 
     // Draw scores
     const { p1score, p2score } = board.getScores();
