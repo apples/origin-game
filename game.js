@@ -7,6 +7,15 @@ const FONT_SIZE = 72;
 const BOARD_HEIGHT = 16;
 
 /**
+ * JS doesn't have enums, so...
+ */
+const Occupant = {
+    NOBODY: 0,
+    PLAYER_1: 1,
+    PLAYER_2: 2,
+};
+
+/**
  * Efraimidis-Spirakis Algorithm A-ExpJ with a constant reservoir size of 1
  */
 class ESSampler {
@@ -41,15 +50,6 @@ class ESSampler {
 };
 
 /**
- * JS doesn't have enums, so...
- */
-const Occupant = {
-    NOBODY: 0,
-    PLAYER_1: 1,
-    PLAYER_2: 2,
-};
-
-/**
  * Board class, holds data about the board
  */
 class Board {
@@ -57,17 +57,39 @@ class Board {
         const w = Math.floor(nrows / 2 + 1);
         const h = Math.ceil(nrows / 2);
 
+        /**
+         * Matrix of tiles organized in stacked triangular fashion. Like this:
+         * 
+         * Board:
+         * 
+         *  [0]
+         * [1|2]
+         *  [3|4]
+         *   [5]
+         * 
+         * nrows = 4
+         * tiles = [
+         *     0, 3, 4,
+         *     1, 2, 5
+         * ]
+         */
         this.tiles = Array.from({ length: w * h }, () => Occupant.NOBODY);
+        /** Number of physical rows on the board */
         this.nrows = nrows;
+        /** Number of physical columns on the board */
         this.ncols = w;
+        /** Columns in the tiles matrix */
         this.matWidth = w;
+        /** Rows in the tiles matrix */
         this.matHeight = h;
     }
 
-    /** Trapezoidal mapping */
+    /** Converts a physical location to an index into the tiles matrix */
     toIndex(r, c) {
         const newr = r % this.matHeight;
 
+        // Check for out-of-bounds, just to be safe.
+        // Everything should mostly be using forEach, so this might not be necessary.
         if (r < 0 || r >= this.nrows ||
             c < 0 || c >= this.ncols ||
             r < this.matHeight && c > r ||
@@ -81,7 +103,7 @@ class Board {
 
     getOccupant(r, c) {
         const i = this.toIndex(r, c);
-        if (i === undefined) return undefined;
+        if (i === undefined) return undefined; // No error in the case of a failed bounds check
         return this.tiles[i];
     }
 
@@ -91,6 +113,7 @@ class Board {
         this.tiles[i] = o;
     }
 
+    /** Calls the given function with every valid {r,c} location */
     forEach(f) {
         for (let r = 0; r < this.nrows; ++r) {
             const cb = Math.max(0, r - this.matHeight + 1);
@@ -102,24 +125,42 @@ class Board {
         }
     }
 
+    /** Calculates the current score for both players */
     getScores() {
+        // Initialize disjoint sets (https://en.wikipedia.org/wiki/Disjoint-set_data_structure)
         const p1sets = Array.from({ length: this.tiles.length }, (_, i) => i);
         const p2sets = Array.from({ length: this.tiles.length }, (_, i) => i);
 
+        // Process each tile once
         this.forEach(({ r, c }) => {
+            /** Set index */
             const i = this.toIndex(r, c);
+            /** Occupant of current tile */
             const occupant = this.tiles[i];
 
+            // If no piece is in tile, nuke its set in both p1 and p2, and skip
             if (occupant === Occupant.NOBODY) {
+                // Nuking the sets like this isn't strictly necessary,
+                // since it will simply lead to a group of 1 being counted for that player,
+                // and a group of 1 doesn't change a players score.
+                // Still, it's useful for clarity while debugging.
                 p1sets[i] = undefined;
                 p2sets[i] = undefined;
                 return;
             }
 
+            // Rename player sets for clarity
             const [my_sets, other_sets] = occupant === Occupant.PLAYER_1 ? [p1sets, p2sets] : [p2sets, p1sets];
 
+            // Nuke set in other player's list (again, this isn't strictly necessary)
             other_sets[i] = undefined;
 
+            /**
+             * Union two sets together and fully compress them.
+             * Full compression hurts performance, but it's the easiest way to ensure correctness.
+             * A more efficient way would be to store the sizes of the sets and union-by-size,
+             * and then to perform path compression opportunistically.
+             */
             const joinSets = (s1, s2) => {
                 my_sets.forEach((s, i) => {
                     if (s === s1) {
@@ -128,30 +169,39 @@ class Board {
                 });
             };
 
+            /** Checks a neighbor tile to see if it belongs to us, and if so, union it to the current tile. */
             const checkNeighbor = (nr, nc) => {
-                if (this.getOccupant(nr, nc) === occupant) {
+                if (this.getOccupant(nr, nc) === occupant) { // Relies on the bounds checking in getOccupant
                     joinSets(my_sets[i], my_sets[this.toIndex(nr, nc)]);
                 }
             };
 
-            checkNeighbor(r - 1, c);
-            checkNeighbor(r - 1, c - 1);
-            checkNeighbor(r, c - 1);
+            // Check neighbors
+            checkNeighbor(r - 1, c); // NorthEast
+            checkNeighbor(r - 1, c - 1); // NorthWest
+            checkNeighbor(r, c - 1); // West
+
+            // We don't need to check the other 3 neighbors, since they will be processed by themselves later.
         });
 
+        /** Calculates the score of a list of sets */
         const scoreSets = (sets) => {
+            /** Mapping table of set indices to set size */
             const scores = {};
 
+            // Calculate set sizes
             for (const s of sets) {
                 if (s !== undefined) {
                     scores[s] = (scores[s] ?? 0) + 1;
                 }
             }
 
+            /** Final score for this player */
             let score = 1;
             
+            // Multiply all the set sizes together
             for (const k in scores) {
-                if (Object.prototype.hasOwnProperty.call(scores, k)) {
+                if (Object.prototype.hasOwnProperty.call(scores, k)) { // Just being paranoid
                     score *= scores[k];
                 }
             }
@@ -188,7 +238,7 @@ const step = (now) => {
     const dt = (now - prevnow) / 1000;
     prevnow = now;
 
-    // Framerate limiter
+    // Framerate limiter (30 fps)
     nextFrame -= dt;
     if (nextFrame > 0) return;
     nextFrame = 1/30;
@@ -299,7 +349,7 @@ const step = (now) => {
 requestAnimationFrame(step);
 
 /**
- * Click event
+ * Click event, uses mousedown for better responsiveness
  */
 canvas.addEventListener('mousedown', (e) => {
     events.push({
@@ -309,7 +359,7 @@ canvas.addEventListener('mousedown', (e) => {
 });
 
 /**
- * Keeps canvas size filling the screen (mostly)
+ * Keeps canvas size filling the screen (mostly, not quite 100% to avoid spurious scrollbars)
  */
 const syncSize = () => {
     const w = window.innerWidth - 8;
