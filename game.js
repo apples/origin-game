@@ -276,7 +276,7 @@ const step = (now) => {
     if (nextFrame > 0) return;
     nextFrame = 1/30;
 
-    // Constants
+    // Coordinate systems and conversions
     const scrw = canvas.width;
     const scrh = canvas.height;
     const camw = 100 * scrw / scrh;
