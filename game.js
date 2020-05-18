@@ -50,6 +50,56 @@ class ESSampler {
 };
 
 /**
+ * Classic disjoint-set implementation, union-by-size with path compression, with node colors (arbitrary data).
+ * 
+ * https://en.wikipedia.org/wiki/Disjoint-set_data_structure
+ */
+class DisjointSet {
+    constructor(size, colors) {
+        this.sets = Array.from({ length: size }, (_, i) => i);
+        this.metadata = Array.from({ length: size }, (_, i) => ({ size: 1, color: colors[i] }));
+    }
+
+    findRoot(id) {
+        if (this.sets[id] != id) {
+            const root = this.findRoot(this.sets[id]);
+            this.sets[id] = root;
+            return root;
+        } else {
+            return id;
+        }
+    }
+
+    union(id1, id2) {
+        const root1 = this.findRoot(id1);
+        const root2 = this.findRoot(id2);
+
+        console.debug('Joining', root1, root2);
+
+        if (root1 === root2) return;
+        
+        const [small, big] = this.metadata[root1].size < this.metadata[root2].size ? [root1, root2] : [root2, root1];
+
+        this.sets[small] = big;
+        this.metadata[big].size += this.metadata[small].size;
+        this.metadata[small] = undefined;
+    }
+
+    eraseNode(id) {
+        this.sets[id] = undefined;
+        this.metadata[id] = undefined;
+    }
+
+    forEach(f) {
+        this.metadata.forEach((m, i) => {
+            if (m) {
+                f(i, m.size, m.color);
+            }
+        });
+    }
+};
+
+/**
  * Board class, holds data about the board
  */
 class Board {
@@ -82,35 +132,35 @@ class Board {
         this.matWidth = w;
         /** Rows in the tiles matrix */
         this.matHeight = h;
+
+        /** Cached */
+        this.cachedScores = undefined;
+    }
+
+    isValidLocation(r, c) {
+        const validRow = r >= 0 && r < this.nrows;
+        const validCol = c >= 0 && c < this.ncols;
+        const inUpperTri = r < this.matHeight && c <= r;
+        const inLowerTri = r >= this.matHeight && c > r - this.matHeight;
+
+        return validRow && validCol && (inUpperTri || inLowerTri);
     }
 
     /** Converts a physical location to an index into the tiles matrix */
     toIndex(r, c) {
-        const newr = r % this.matHeight;
-
-        // Check for out-of-bounds, just to be safe.
-        // Everything should mostly be using forEach, so this might not be necessary.
-        if (r < 0 || r >= this.nrows ||
-            c < 0 || c >= this.ncols ||
-            r < this.matHeight && c > r ||
-            r >= this.matHeight && c <= newr
-        ) {
-            return undefined;
-        }
-
-        return newr * this.matWidth + c;
+        return (r % this.matHeight) * this.matWidth + c;
     }
 
     getOccupant(r, c) {
         const i = this.toIndex(r, c);
-        if (i === undefined) return undefined; // No error in the case of a failed bounds check
         return this.tiles[i];
     }
 
     setOccupant(r, c, o) {
+        if (!this.isValidLocation(r, c)) throw new Error(`setOccupant: Invalid location: { r = ${r}, c = ${c} }`);
         const i = this.toIndex(r, c);
-        if (i === undefined) throw new Error(`setOccupant: Invalid location: { r = ${r}, c = ${c} }`);
         this.tiles[i] = o;
+        this.cachedScores = undefined;
     }
 
     /** Calls the given function with every valid {r,c} location */
@@ -120,99 +170,82 @@ class Board {
             const ce = Math.min(r - this.matHeight + this.ncols, this.ncols);
 
             for (let c = cb; c < ce; ++c) {
-                f({ r, c });
+                const i = this.toIndex(r, c);
+                f({ r, c, i, occupant: this.tiles[i] });
             }
         }
     }
 
-    /** Calculates the current score for both players */
+    /**
+     * Calculates the current score for both players.
+     * 
+     * Note: We could make this far more efficient by storing the disjoint-set structure as a class member,
+     *       and incrementally update the scores each time setOccupant is called.
+     *       However, since this algorithm might need to be applied to arbitrarily constructed boards in the future,
+     *       it's more convenient to recalculate the disjoint-sets every time.
+     *       The algorithm is essentially O(n) though, so it shouldn't be a problem.
+     */
     getScores() {
-        // Initialize disjoint sets (https://en.wikipedia.org/wiki/Disjoint-set_data_structure)
-        const p1sets = Array.from({ length: this.tiles.length }, (_, i) => i);
-        const p2sets = Array.from({ length: this.tiles.length }, (_, i) => i);
+        if (this.cachedScores) return this.cachedScores;
+
+        console.debug('getScores()');
+        /** Tile groups */
+        const sets = new DisjointSet(this.tiles.length, this.tiles);
 
         // Process each tile once
-        this.forEach(({ r, c }) => {
-            /** Set index */
-            const i = this.toIndex(r, c);
-            /** Occupant of current tile */
-            const occupant = this.tiles[i];
+        this.forEach(({ r, c, i, occupant }) => {
+            console.debug({ r, c, i, occupant });
 
-            // If no piece is in tile, nuke its set in both p1 and p2, and skip
+            // Don't process unowned tiles
             if (occupant === Occupant.NOBODY) {
-                // Nuking the sets like this isn't strictly necessary,
-                // since it will simply lead to a group of 1 being counted for that player,
-                // and a group of 1 doesn't change a players score.
-                // Still, it's useful for clarity while debugging.
-                p1sets[i] = undefined;
-                p2sets[i] = undefined;
                 return;
             }
 
-            // Rename player sets for clarity
-            const [my_sets, other_sets] = occupant === Occupant.PLAYER_1 ? [p1sets, p2sets] : [p2sets, p1sets];
-
-            // Nuke set in other player's list (again, this isn't strictly necessary)
-            other_sets[i] = undefined;
-
-            /**
-             * Union two sets together and fully compress them.
-             * Full compression hurts performance, but it's the easiest way to ensure correctness.
-             * A more efficient way would be to store the sizes of the sets and union-by-size,
-             * and then to perform path compression opportunistically.
-             */
-            const joinSets = (s1, s2) => {
-                my_sets.forEach((s, i) => {
-                    if (s === s1) {
-                        my_sets[i] = s2;
-                    }
-                });
-            };
-
             /** Checks a neighbor tile to see if it belongs to us, and if so, union it to the current tile. */
             const checkNeighbor = (nr, nc) => {
-                if (this.getOccupant(nr, nc) === occupant) { // Relies on the bounds checking in getOccupant
-                    joinSets(my_sets[i], my_sets[this.toIndex(nr, nc)]);
+                if (!board.isValidLocation(nr, nc)) return;
+                if (this.getOccupant(nr, nc) === occupant) {
+                    sets.union(i, this.toIndex(nr, nc));
                 }
             };
 
             // Check neighbors
+            // We don't need to check the other 3 neighbors, since they will be processed again later.
             checkNeighbor(r - 1, c); // NorthEast
             checkNeighbor(r - 1, c - 1); // NorthWest
             checkNeighbor(r, c - 1); // West
-
-            // We don't need to check the other 3 neighbors, since they will be processed by themselves later.
         });
 
-        /** Calculates the score of a list of sets */
-        const scoreSets = (sets) => {
-            /** Mapping table of set indices to set size */
-            const scores = {};
+        let p1score = 1;
+        let p2score = 1;
+        let p1estimate = 0;
+        let p2estimate = 0;
 
-            // Calculate set sizes
-            for (const s of sets) {
-                if (s !== undefined) {
-                    scores[s] = (scores[s] ?? 0) + 1;
-                }
+        sets.forEach((_id, size, owner) => {
+            // estimate heuristic
+            const int = Math.floor(Math.log2(size));
+            const frac = (size - Math.pow(2, int)) / Math.pow(2, int);
+            const estimate = int + frac;
+
+            switch (owner) {
+                case Occupant.PLAYER_1:
+                    p1score *= size;
+                    p1estimate += estimate;
+                    break;
+                case Occupant.PLAYER_2:
+                    p2score *= size;
+                    p2estimate += estimate;
+                    break;
             }
+        });
 
-            /** Final score for this player */
-            let score = 1;
-            
-            // Multiply all the set sizes together
-            for (const k in scores) {
-                if (Object.prototype.hasOwnProperty.call(scores, k)) { // Just being paranoid
-                    score *= scores[k];
-                }
-            }
+        // Log scale
+        p1score = Math.log2(p1score);
+        p2score = Math.log2(p2score);
 
-            return score;
-        };
+        this.cachedScores = { p1score, p2score, p1estimate, p2estimate };
 
-        const p1score = scoreSets(p1sets);
-        const p2score = scoreSets(p2sets);
-
-        return { p1score, p2score };
+        return this.cachedScores;
     }
 }
 
@@ -267,9 +300,13 @@ const step = (now) => {
     for (const { type, event } of events) {
         switch (type) {
             case 'click': {
+                // Only allow during P1's turn
                 if (currentPlayer !== 1) break;
 
                 const { r, c } = scr2tile(event.clientX, event.clientY);
+
+                if (!board.isValidLocation(r, c)) break;
+
                 const occupant = board.getOccupant(r, c);
 
                 if (occupant !== undefined) {
@@ -290,8 +327,8 @@ const step = (now) => {
     if (currentPlayer === 2) {
         const samp = new ESSampler();
 
-        board.forEach(({ r, c }) => {
-            if (board.getOccupant(r, c) === Occupant.NOBODY) {
+        board.forEach(({ r, c, occupant }) => {
+            if (occupant === Occupant.NOBODY) {
                 samp.insert({ r, c }, 1);
             }
         });
@@ -310,9 +347,8 @@ const step = (now) => {
     ctx.clearRect(0, 0, scrw, scrh);
 
     // Draw board
-    board.forEach(({r, c}) => {
+    board.forEach(({ r, c, occupant }) => {
         const { x, y } = tile2scr(r, c);
-        const occupant = board.getOccupant(r, c);
         const drawCircle = (style) => {
             ctx.fillStyle = style;
             ctx.beginPath();
@@ -336,15 +372,19 @@ const step = (now) => {
     });
 
     // Draw scores
-    const { p1score, p2score } = board.getScores();
+    let row = 1;
+    const drawScore = (name, value, style) => {
+        ctx.fillStyle = style;
+        ctx.fillText(`${name}: ${value}`, 32, 32 + FONT_SIZE * row);
+        ++row;
+    };
+    const { p1score, p2score, p1estimate, p2estimate } = board.getScores();
     
     ctx.font = `${FONT_SIZE}px Consolas`;
-
-    ctx.fillStyle = '#e40';
-    ctx.fillText(`P1: ${p1score}`, 32, 32 + FONT_SIZE);
-
-    ctx.fillStyle = '#04e';
-    ctx.fillText(`P2: ${p2score}`, 32, 32 + FONT_SIZE * 2);
+    drawScore('P1', Math.round(p1score * 100), '#e40');
+    drawScore('P1E', p1estimate, '#a32');
+    drawScore('P2', Math.round(p2score * 100), '#04e');
+    drawScore('P2E', p2estimate, '#23a');
 };
 requestAnimationFrame(step);
 
